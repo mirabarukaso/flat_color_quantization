@@ -62,7 +62,7 @@ def sharpen(img, sigma=1.0, strength=1.0):
     # Return to [H, W, C] format
     sharpened = sharpened.squeeze(0).permute(1, 2, 0)
     
-    del img, blurred, sharpened, kernel_h, kernel_v, gaussian_kernel
+    del img, blurred, kernel_h, kernel_v, gaussian_kernel
     torch.cuda.empty_cache()
     return sharpened.clamp(0, 255)
 
