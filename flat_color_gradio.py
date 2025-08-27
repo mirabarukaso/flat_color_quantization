@@ -4,6 +4,7 @@ import torch
 import numpy as np
 import torch
 import torch.nn.functional as F
+from color_transfer import ColorTransfer
 
 def kmeans_gpu_soft(x, n_clusters=20, n_iter=10, temperature=1.0):
     """
@@ -139,7 +140,7 @@ def flat_color_multi_scale(image_input, n_colors=20, scales=[1.0, 0.5, 0.25],
             
         return out_img
 
-def process_image(input_image, n_colors, temperature, spatial_scale, sharpen_strength):
+def process_image(input_image, n_colors, temperature, spatial_scale, sharpen_strength, color_transfer):
     if input_image is None:
         return None
 
@@ -150,24 +151,40 @@ def process_image(input_image, n_colors, temperature, spatial_scale, sharpen_str
                                          sharpen_strength=sharpen_strength)
     
     torch.cuda.empty_cache()
+    
+    if color_transfer != "None":
+        ct = ColorTransfer()
+        if color_transfer == "Mean":
+            processed_img = ct.mean_std_transfer(img_arr_ref=input_image, img_arr_in=processed_img)
+        elif color_transfer == "Lab":
+            processed_img = ct.lab_transfer(img_arr_ref=input_image, img_arr_in=processed_img)
+        elif color_transfer == "Pdf":
+            processed_img = ct.pdf_transfer(img_arr_ref=input_image, img_arr_in=processed_img, regrain=False)
+        elif color_transfer == "Pdf+Regrain":
+            processed_img = ct.pdf_transfer(img_arr_ref=input_image, img_arr_in=processed_img, regrain=True)
+    
     return processed_img
 
 with gr.Blocks() as demo:
     gr.Markdown("# Flat Color multi-scale image processing")
     with gr.Row():
-        with gr.Column():            
+        with gr.Column():
             process_button = gr.Button("Start Processing", variant="primary")
-            n_colors = gr.Slider(minimum=2, maximum=1024, value=512, step=1, label="Color Count")
+            color_transfer = gr.Dropdown(choices=["Mean", "Lab", "Pdf", "Pdf+Regrain", "None"], value="None", label="Image Color Transfer")
+            sharpen_strength = gr.Slider(minimum=0, maximum=10, value=0, step=0.1, label="Sharpen Strength 0=off")
+        with gr.Column():
+            n_colors = gr.Slider(minimum=2, maximum=1024, value=512, step=1, label="Color Count, more colors = more VRAM")
             temperature = gr.Slider(minimum=1, maximum=20, value=9, step=0.1, label="Temperature")
-            spatial_scale = gr.Slider(minimum=1, maximum=500, value=160, step=1, label="Spatial Scale")
-            sharpen_strength = gr.Slider(minimum=0, maximum=10, value=0, step=0.1, label="Sharpen Strength 0=off")            
+            spatial_scale = gr.Slider(minimum=1, maximum=500, value=160, step=1, label="Spatial Scale")            
+    with gr.Row():
+        with gr.Column():
             input_img = gr.Image(label="upload image", type="numpy")
         with gr.Column():
             output_img = gr.Image(format="png", label="Output Image")
     
     process_button.click(
         fn=process_image,
-        inputs=[input_img, n_colors, temperature, spatial_scale, sharpen_strength],
+        inputs=[input_img, n_colors, temperature, spatial_scale, sharpen_strength, color_transfer],
         outputs=output_img
     )
 

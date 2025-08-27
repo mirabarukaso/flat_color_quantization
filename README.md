@@ -1,9 +1,14 @@
 # flat_color_quantization
 This is an experimental app based on personal interests.      
 
-## Only works for few types      
+# Run 
+*Only works for few types*      
 *WAINING: 1536 x 2304 need about 30G VRAM*
+```
+python flat_color_gradio.py
+```
 
+## Settings
 ```
 # sharpen_strength is not the root cause, you can always use sharpen_strength = 0(Default)
 
@@ -12,10 +17,6 @@ This is an experimental app based on personal interests.
 # temperature=9, spatial_scale=160, sharpen_strength=1.5    # 512 color
 # temperature=4.0, spatial_scale=60, sharpen_strength=0.8   
 ```
-# Run 
-```
-python flat_color_gradio.py
-```
 
 # Example 
 | Before | After |
@@ -23,3 +24,5 @@ python flat_color_gradio.py
 | <img src="https://github.com/mirabarukaso/flat_color_quantization/blob/main/ai_before.png" width=35%> | <img src="https://github.com/mirabarukaso/flat_color_quantization/blob/main/ai_after.png" width=35%> |
 | <img src="https://github.com/mirabarukaso/flat_color_quantization/blob/main/example_before.png" width=75%> | <img src="https://github.com/mirabarukaso/flat_color_quantization/blob/main/example_after.png" width=75%> |
 
+# Image Color Transfer
+Please refer to [Image Color Transfer](https://github.com/mirabarukaso/ComfyUI_Mira#image-color-transfer) for more details about Image Color Transfer.      
