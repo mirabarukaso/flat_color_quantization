@@ -12,7 +12,12 @@ This is an experimental app based on personal interests.
 # temperature=9, spatial_scale=160, sharpen_strength=1.5    # 512 color
 # temperature=4.0, spatial_scale=60, sharpen_strength=0.8   
 ```
+# Run 
+```
+python flat_color_gradio.py
+```
 
+# Example 
 | Before | After |
 | --- | --- |
 | <img src="https://github.com/mirabarukaso/flat_color_quantization/blob/main/ai_before.png" width=35%> | <img src="https://github.com/mirabarukaso/flat_color_quantization/blob/main/ai_after.png" width=35%> |
