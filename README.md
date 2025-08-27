@@ -2,6 +2,7 @@
 This is an experimental app based on personal interests.      
 
 ## Only works for few types      
+## WAINING: 1536 x 2304 need about 30G VRAM     
 
 | Before | After |
 | --- | --- |
