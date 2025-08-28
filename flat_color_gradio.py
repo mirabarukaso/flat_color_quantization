@@ -175,7 +175,7 @@ with gr.Blocks() as demo:
         with gr.Column():
             n_colors = gr.Slider(minimum=2, maximum=1024, value=512, step=1, label="Color Count, more colors = more VRAM")
             temperature = gr.Slider(minimum=1, maximum=20, value=2, step=0.1, label="Temperature")
-            spatial_scale = gr.Slider(minimum=1, maximum=500, value=160, step=1, label="Spatial Scale")            
+            spatial_scale = gr.Slider(minimum=1, maximum=500, value=80, step=1, label="Spatial Scale")            
     with gr.Row():
         with gr.Column():
             input_img = gr.Image(label="upload image", type="numpy")
