@@ -171,10 +171,10 @@ with gr.Blocks() as demo:
         with gr.Column():
             process_button = gr.Button("Start Processing", variant="primary")
             color_transfer = gr.Dropdown(choices=["Mean", "Lab", "Pdf", "Pdf+Regrain", "None"], value="None", label="Image Color Transfer")
-            sharpen_strength = gr.Slider(minimum=0, maximum=10, value=0, step=0.1, label="Sharpen Strength 0=off")
+            sharpen_strength = gr.Slider(minimum=0, maximum=10, value=1.0, step=0.1, label="Sharpen Strength 0=off")
         with gr.Column():
             n_colors = gr.Slider(minimum=2, maximum=1024, value=512, step=1, label="Color Count, more colors = more VRAM")
-            temperature = gr.Slider(minimum=1, maximum=20, value=9, step=0.1, label="Temperature")
+            temperature = gr.Slider(minimum=1, maximum=20, value=2, step=0.1, label="Temperature")
             spatial_scale = gr.Slider(minimum=1, maximum=500, value=160, step=1, label="Spatial Scale")            
     with gr.Row():
         with gr.Column():
