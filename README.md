@@ -8,16 +8,6 @@ This is an experimental app based on personal interests.
 python flat_color_gradio.py
 ```
 
-## Settings
-```
-# sharpen_strength is not the root cause, you can always use sharpen_strength = 0(Default)
-
-# temperature=4.5, spatial_scale=80, sharpen_strength=1.0   # 256 color
-# temperature=6, spatial_scale=150, sharpen_strength=1.3    # 384 color
-# temperature=9, spatial_scale=160, sharpen_strength=1.5    # 512 color
-# temperature=4.0, spatial_scale=60, sharpen_strength=0.8   
-```
-
 # Example 
 | Before | After |
 | --- | --- |
