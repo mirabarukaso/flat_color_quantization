@@ -10,7 +10,7 @@ def kmeans_gpu_soft(x, n_clusters=20, n_iter=10, temperature=1.0):
     """
     temperature: more soft when larger, more hard when smaller
     """
-    N, C = x.shape
+    N, _ = x.shape
     device = x.device
 
     # initialize centers randomly
@@ -67,69 +67,104 @@ def sharpen(img, sigma=1.0, strength=1.0):
     torch.cuda.empty_cache()
     return sharpened.clamp(0, 255)
 
-# flat color quantization with multi-scale processing
+def process_block(img_block, n_colors, spatial_scale, scale, temperature, device="cuda"):
+    # Process a single image block with clustering and reconstruction
+    h, w, _ = img_block.shape
+    img_tensor = torch.from_numpy(img_block).float().to(device)
+    img_flat = img_tensor.reshape(-1, 3)
+    
+    # Spatial features
+    xx, yy = torch.meshgrid(torch.arange(h, device=device),
+                            torch.arange(w, device=device),
+                            indexing="ij")
+    
+    features = torch.cat([
+        img_flat,
+        xx.reshape(-1, 1).float() / h * spatial_scale * scale,
+        yy.reshape(-1, 1).float() / w * spatial_scale * scale
+    ], dim=1)
+    
+    # Clustering
+    weights, centers = kmeans_gpu_soft(features, n_clusters=n_colors, temperature=temperature)
+    
+    # Reconstruction
+    rgb_centers = centers[:, :3]
+    dist_to_pixels = torch.cdist(rgb_centers, img_flat)
+    closest_pixel_indices = dist_to_pixels.argmin(dim=1)
+    new_colors = img_flat[closest_pixel_indices]
+    
+    out_flat = torch.mm(weights, new_colors)
+    out = out_flat.reshape(h, w, 3)
+    return out
+
 def flat_color_multi_scale(image_input, n_colors=20, scales=[1.0, 0.5, 0.25], 
-                          spatial_scale=50, temperature=2.0, sharpen_strength=1.0):
+                          spatial_scale=50, temperature=2.0, sharpen_strength=1.0,
+                          block_size=512):
     """
-    Multi-scale flat color processing    
+    Multi-scale flat color processing to reduce layering, with sharpening post-processing, 
+    supports block processing to reduce VRAM usage
     """
     with torch.no_grad():
         img_rgb = image_input
         if img_rgb.shape[2] != 3:
             raise ValueError("Input image must have 3 channels (RGB).")
-
+        
+        # Apply bilateral filter
+        denoised = cv2.bilateralFilter(img_rgb, d=9, sigmaColor=75, sigmaSpace=75)
+        
+        # Texture enhancement: Unsharp Masking
+        blurred = cv2.GaussianBlur(denoised, (5, 5), sigmaX=1.0)
+        sharpened = cv2.addWeighted(denoised, 1.5, blurred, -0.5, 0)
+        del denoised, blurred
+    
+        img_rgb = sharpened
+        
         h, w, _ = img_rgb.shape
-
         results = []
         
         for scale in scales:
-            # scale image
+            # Resize image
             new_h, new_w = int(h * scale), int(w * scale)
             img_resized = cv2.resize(img_rgb, (new_w, new_h))
             
-            # convert to Tensor
-            img_tensor = torch.from_numpy(img_resized).float().to("cuda")
-            img_flat = img_tensor.reshape(-1, 3)
-            
-            # spatial features
-            xx, yy = torch.meshgrid(torch.arange(new_h, device="cuda"),
-                                    torch.arange(new_w, device="cuda"),
-                                    indexing="ij")
-            features = torch.cat([
-                img_flat,
-                xx.reshape(-1, 1).float() / new_h * spatial_scale * scale,
-                yy.reshape(-1, 1).float() / new_w * spatial_scale * scale
-            ], dim=1)
-            
-            # clustering
-            weights, centers = kmeans_gpu_soft(features, n_clusters=n_colors, 
-                                            temperature=temperature)
-            
-            # reconstruction
-            rgb_centers = centers[:, :3]
-            dist_to_pixels = torch.cdist(rgb_centers, img_flat)
-            closest_pixel_indices = dist_to_pixels.argmin(dim=1)
-            new_colors = img_flat[closest_pixel_indices]
-            
-            out_flat = torch.mm(weights, new_colors)
-            out = out_flat.reshape(new_h, new_w, 3)
-            
-            # resize back to original size
-            out_np = out.clamp(0, 255).byte().cpu().numpy()
-            out_resized = cv2.resize(out_np, (w, h))
-            results.append(torch.from_numpy(out_resized).float().to("cuda"))
-            
-            del img_resized, img_flat, img_tensor, features, weights, centers, out_flat, out, out_np, out_resized, rgb_centers, dist_to_pixels, closest_pixel_indices, new_colors
-            torch.cuda.empty_cache()
+            # Check if block processing is needed
+            if new_h > block_size or new_w > block_size:
+                block_results = np.zeros((new_h, new_w, 3), dtype=np.uint8)
+                step_h = block_size
+                step_w = block_size
+                
+                for i in range(0, new_h, step_h):
+                    for j in range(0, new_w, step_w):
+                        # Extract block, slightly expand boundaries to avoid seams
+                        i_end = min(i + step_h, new_h)
+                        j_end = min(j + step_w, new_w)
+                        block = img_resized[i:i_end, j:j_end]
+                        
+                        # Process block
+                        out_block = process_block(block, n_colors, spatial_scale, scale, temperature)
+                        out_block_np = out_block.clamp(0, 255).byte().cpu().numpy()
+                        block_results[i:i_end, j:j_end] = out_block_np
+                        
+                        # Clear GPU memory
+                        torch.cuda.empty_cache()
+                
+                out_resized = cv2.resize(block_results, (w, h))
+                results.append(torch.from_numpy(out_resized).float().to("cuda"))
+            else:
+                # Directly process the entire resized image
+                out = process_block(img_resized, n_colors, spatial_scale, scale, temperature)
+                out_np = out.clamp(0, 255).byte().cpu().numpy()
+                out_resized = cv2.resize(out_np, (w, h))
+                results.append(torch.from_numpy(out_resized).float().to("cuda"))
         
-        # fuse multi-scale results
+        # Combine multi-scale results
         final_result = sum(results) / len(results)
         
         # post-processing - bilateral smoothing
         final_result = bilateral_smooth(final_result, d=11, sigma_color=35, sigma_space=70)
         
         # post-processing - sharpening
-        if sharpen_strength > 0:
+        if sharpen_strength > 0.01:
             final_result = sharpen(final_result, sigma=1.0, strength=sharpen_strength)
         
         out_img = final_result.clamp(0, 255).byte().cpu().numpy()
@@ -140,15 +175,18 @@ def flat_color_multi_scale(image_input, n_colors=20, scales=[1.0, 0.5, 0.25],
             
         return out_img
 
-def process_image(input_image, n_colors, temperature, spatial_scale, sharpen_strength, color_transfer):
+def process_image(input_image, n_colors, temperature, spatial_scale, sharpen_strength, 
+                  color_transfer, block_size):
     if input_image is None:
         return None
-
+        
     processed_img = flat_color_multi_scale(input_image, 
-                                         n_colors=n_colors,
-                                         temperature=temperature,
-                                         spatial_scale=spatial_scale,
-                                         sharpen_strength=sharpen_strength)
+                                            n_colors=n_colors,
+                                            temperature=temperature,
+                                            spatial_scale=spatial_scale,
+                                            sharpen_strength=sharpen_strength,
+                                            block_size=block_size
+                                         )
     
     torch.cuda.empty_cache()
     
@@ -165,27 +203,35 @@ def process_image(input_image, n_colors, temperature, spatial_scale, sharpen_str
     
     return processed_img
 
+def color_enhance_enable(trigger):
+    clip = gr.Slider(interactive=trigger)
+    grid = gr.Slider(interactive=trigger)
+    return clip, grid
+            
 with gr.Blocks() as demo:
     gr.Markdown("# Flat Color multi-scale image processing")
     with gr.Row():
-        with gr.Column():
-            process_button = gr.Button("Start Processing", variant="primary")
+        with gr.Column():                                    
+            n_colors = gr.Slider(minimum=2, maximum=65536, value=2048, step=1, label="Color Count, more colors = more VRAM")
+            block_size = gr.Slider(minimum=64, maximum=4096, value=512, step=64, label="Tiled processing block size")            
             color_transfer = gr.Dropdown(choices=["Mean", "Lab", "Pdf", "Pdf+Regrain", "None"], value="None", label="Image Color Transfer")
-            sharpen_strength = gr.Slider(minimum=0, maximum=10, value=1.0, step=0.1, label="Sharpen Strength 0=off")
-        with gr.Column():
-            n_colors = gr.Slider(minimum=2, maximum=1024, value=512, step=1, label="Color Count, more colors = more VRAM")
-            temperature = gr.Slider(minimum=1, maximum=20, value=2, step=0.1, label="Temperature")
-            spatial_scale = gr.Slider(minimum=1, maximum=500, value=80, step=1, label="Spatial Scale")            
+        with gr.Column():                                    
+            temperature = gr.Slider(minimum=1, maximum=10, value=2, step=0.1, label="Temperature")
+            spatial_scale = gr.Slider(minimum=1, maximum=300, value=80, step=1, label="Spatial Scale")                        
+            sharpen_strength = gr.Slider(minimum=0, maximum=10, value=0, step=0.05, label="Sharpen Strength 0=Off")
+    with gr.Row():
+        process_button = gr.Button("Start Processing", variant="primary")
     with gr.Row():
         with gr.Column():
-            input_img = gr.Image(label="upload image", type="numpy")
+            input_image = gr.Image(label="upload image", type="numpy")
         with gr.Column():
-            output_img = gr.Image(format="png", label="Output Image")
+            output_image = gr.Image(format="png", label="Output Image")
     
     process_button.click(
         fn=process_image,
-        inputs=[input_img, n_colors, temperature, spatial_scale, sharpen_strength, color_transfer],
-        outputs=output_img
+        inputs=[input_image, n_colors, temperature, spatial_scale, sharpen_strength, 
+                  color_transfer, block_size],
+        outputs=output_image
     )
 
 if __name__ == "__main__":

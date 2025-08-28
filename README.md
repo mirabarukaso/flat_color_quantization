@@ -3,9 +3,12 @@ This is an experimental app based on personal interests.
 
 # Run 
 *Only works for few types*      
-*WAINING: 1536 x 2304 need about 30G VRAM*
 ```
+# Gradio
 python flat_color_gradio.py
+
+# Console 
+python flat_color.py
 ```
 
 # Example 
