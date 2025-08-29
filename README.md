@@ -2,7 +2,8 @@
 This is an experimental app based on personal interests.      
 
 # Run 
-*Only works for few types*      
+*Only works for few types*  
+    
 ```
 # Gradio
 python flat_color_gradio.py

@@ -11,50 +11,55 @@ def kmeans_gpu_soft(x, n_clusters=20, n_iter=10, temperature=1.0):
     Soft clustering version of K-means, using a temperature parameter to control clustering hardness
     temperature: Lower values result in harder clustering, higher values result in softer clustering
     """
-    N, C = x.shape
-    device = x.device
+    with torch.no_grad():
+        N, _ = x.shape
+        device = x.device
 
-    # Randomly initialize cluster centers
-    indices = torch.randperm(N, device=device)[:n_clusters]
-    centers = x[indices]
+        # Randomly initialize cluster centers
+        indices = torch.randperm(N, device=device)[:n_clusters]
+        centers = x[indices]
 
-    for _ in range(n_iter):
-        # Calculate distances and use softmax to obtain soft assignments
-        dist = torch.cdist(x, centers)  # [N, K]
-        weights = F.softmax(-dist / temperature, dim=1)  # [N, K]
+        for _ in range(n_iter):
+            # Calculate distances and use softmax to obtain soft assignments
+            dist = torch.cdist(x, centers)  # [N, K]
+            weights = F.softmax(-dist / temperature, dim=1)  # [N, K]
+            
+            # Recalculate centers based on soft assignments
+            new_centers = torch.mm(weights.T, x) / (weights.sum(dim=0, keepdim=True).T + 1e-8)
+            centers = new_centers
+            del dist  # Explicitly free memory
         
-        # Recalculate centers based on soft assignments
-        new_centers = torch.mm(weights.T, x) / (weights.sum(dim=0, keepdim=True).T + 1e-8)
-        centers = new_centers
-    
-    return weights, centers
+        return weights, centers
 
 def sharpen(img, sigma=1.0, strength=1.0):
     """Unsharp mask sharpening using Gaussian blur"""
-    # Ensure image is in [C, H, W] format for convolution
-    img = img.permute(2, 0, 1).unsqueeze(0)  # [1, C, H, W]
-    
-    # Create Gaussian kernel
-    kernel_size = int(6 * sigma + 1)  # Ensure odd kernel size
-    if kernel_size % 2 == 0:
-        kernel_size += 1
-    gaussian_kernel = torch.exp(-torch.arange(-(kernel_size//2), kernel_size//2 + 1, device=img.device)**2 / (2 * sigma**2))
-    gaussian_kernel = gaussian_kernel / gaussian_kernel.sum()
-    
-    # Reshape for horizontal and vertical kernels
-    kernel_h = gaussian_kernel.view(1, 1, 1, kernel_size).repeat(3, 1, 1, 1)  # [3, 1, 1, kernel_size]
-    kernel_v = gaussian_kernel.view(1, 1, kernel_size, 1).repeat(3, 1, 1, 1)  # [3, 1, kernel_size, 1]
-    
-    # Apply separable Gaussian blur
-    blurred = F.conv2d(img, kernel_h, groups=3, padding=(0, kernel_size//2))
-    blurred = F.conv2d(blurred, kernel_v, groups=3, padding=(kernel_size//2, 0))
-    
-    # Compute unsharp mask
-    sharpened = img + strength * (img - blurred)
-    
-    # Return to [H, W, C] format
-    sharpened = sharpened.squeeze(0).permute(1, 2, 0)
-    return sharpened.clamp(0, 255)
+    with torch.no_grad():
+        # Ensure image is in [C, H, W] format for convolution
+        img = img.permute(2, 0, 1).unsqueeze(0)  # [1, C, H, W]
+        
+        # Create Gaussian kernel
+        kernel_size = int(6 * sigma + 1)  # Ensure odd kernel size
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        gaussian_kernel = torch.exp(-torch.arange(-(kernel_size//2), kernel_size//2 + 1, device=img.device)**2 / (2 * sigma**2))
+        gaussian_kernel = gaussian_kernel / gaussian_kernel.sum()
+        
+        # Reshape for horizontal and vertical kernels
+        kernel_h = gaussian_kernel.view(1, 1, 1, kernel_size).repeat(3, 1, 1, 1)  # [3, 1, 1, kernel_size]
+        kernel_v = gaussian_kernel.view(1, 1, kernel_size, 1).repeat(3, 1, 1, 1)  # [3, 1, kernel_size, 1]
+        
+        # Apply separable Gaussian blur
+        blurred = F.conv2d(img, kernel_h, groups=3, padding=(0, kernel_size//2))
+        blurred = F.conv2d(blurred, kernel_v, groups=3, padding=(kernel_size//2, 0))
+        
+        # Compute unsharp mask
+        sharpened = img + strength * (img - blurred)
+        
+        del blurred, kernel_h, kernel_v  # Free memory
+        
+        # Return to [H, W, C] format
+        sharpened = sharpened.squeeze(0).permute(1, 2, 0)
+        return sharpened.clamp(0, 255)
 
 def process_block(img_block, n_colors, spatial_scale, scale, temperature, device="cuda"):
     """Process a single image block with clustering and reconstruction"""
@@ -84,6 +89,8 @@ def process_block(img_block, n_colors, spatial_scale, scale, temperature, device
     
     out_flat = torch.mm(weights, new_colors)
     out = out_flat.reshape(h, w, 3)
+    
+    del img_flat, xx, yy, features, weights, centers, dist_to_pixels, closest_pixel_indices, out_flat  # Free memory
     return out
 
 class FlatColorizer:
@@ -213,7 +220,7 @@ class FlatColorizer:
         
     def _tile_process_image(self, img_rgb: np.ndarray, target_scale: float, tile_size=512, overlap=32):
         """Process large images in tiles to avoid memory issues"""
-        h, w, c = img_rgb.shape
+        h, w, _ = img_rgb.shape
         scale = self.model_scale or 4
         
         # Calculate output dimensions
@@ -256,6 +263,7 @@ class FlatColorizer:
                 output[out_i:out_i_end, out_j:out_j_end] = tile_out
                 
                 # Clear GPU memory
+                del tile_out  # Free memory
                 torch.cuda.empty_cache()
         
         # Handle final scale adjustment
@@ -319,34 +327,9 @@ class FlatColorizer:
         return self._cv2_super_sample(img_rgb, scale)
     
     # =========================================================
-    # 5. Main processing 
+    # 5. Process GPU soft
     # =========================================================
-    def flat_color_multi_scale(
-        self,
-        img_path,
-        n_colors=512,
-        temperature=2,
-        spatial_scale=80,
-        sharpen_strength=0.0,
-        block_size=512,
-        upscale=1.0,
-        model_path=None,
-        denoising=None
-    ):
-        img_bgr = cv2.imread(img_path)
-        if img_bgr is None:
-            raise FileNotFoundError(f"Failed to load image: {img_path}")
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)        
-
-        # Step 1. Super-sampling        
-        if upscale > 1.001:
-            if upscale > 8:
-                upscale = 8
-                print(f"[INFO] Upscale too big, reset to: {upscale}")
-            img_rgb = self.super_sample(img_rgb, upscale, model_path)
-
-        # Step 2. Call original flat_color's process_block
-        scales = [1.0, 0.75, 0.5, 0.25]
+    def start_process(self, img_rgb, n_colors, spatial_scale, scales, temperature, block_size):
         h, w, _ = img_rgb.shape
         results = []
 
@@ -389,7 +372,7 @@ class FlatColorizer:
                 
                 print(f"[DEBUG] Resizing block results to original dimensions: {w}x{h}")
                 out_resized = cv2.resize(block_results, (w, h))
-                results.append(torch.from_numpy(out_resized).float().to("cuda"))
+                results.append(torch.from_numpy(out_resized).float())  # Keep on CPU
                 print(f"[DEBUG] Appended block-processed result, shape: {out_resized.shape}")
             else:
                 print(f"[INFO] Image size {new_h}x{new_w} within block size, processing directly")
@@ -398,27 +381,71 @@ class FlatColorizer:
                 out_np = out.clamp(0, 255).byte().cpu().numpy()
                 print(f"[DEBUG] Direct processing completed, output shape: {out_np.shape}")
                 out_resized = cv2.resize(out_np, (w, h))
-                results.append(torch.from_numpy(out_resized).float().to("cuda"))
+                results.append(torch.from_numpy(out_resized).float())  # Keep on CPU
                 print(f"[DEBUG] Appended direct-processed result, shape: {out_resized.shape}")
         
         # Combine multi-scale results
         final_result = sum(results) / len(results)
+        final_result = final_result.to("cuda") if self.device == "cuda" else final_result
+        return final_result
+    
+    # =========================================================
+    # 6. Main processing 
+    # =========================================================
+    def unload_model(self):
+        if self.upscale_model is not None:
+            self.upscale_model = None
+            self.model_scale = None
+            torch.cuda.empty_cache()
+            print("[INFO] Unloaded upscale model from memory")
+            
+    def flat_color_multi_scale(
+        self,
+        img_path,
+        n_colors=512,
+        temperature=2,
+        spatial_scale=80,
+        sharpen_strength=0.0,
+        block_size=512,
+        upscale=1.0,
+        model_path=None,
+        denoising=None,
+        img_rgb=None
+    ):
+        if img_path != None:
+            img_bgr = cv2.imread(img_path)
+            if img_bgr is None:
+                raise FileNotFoundError(f"Failed to load image: {img_path}")
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)        
+            
+        original_h, original_w = img_rgb.shape[:2]
+
+        # Step 1. Super-sampling        
+        if upscale > 1.001:
+            if upscale > 8:
+                upscale = 8
+                print(f"[INFO] Upscale too big, reset to: {upscale}")
+            img_rgb = self.super_sample(img_rgb, upscale, model_path)
+
+        # Step 2. Call original flat_color's process_block
+        scales = [1.0, 0.75, 0.5, 0.25]
+        final_result = self.start_process(img_rgb, n_colors, spatial_scale, scales, temperature, block_size)
             
         # Step 3. Denoising
         if denoising:
-            print(f"[INFO] Applying denoising after multi-scale processing")
+            print("[INFO] Applying denoising after multi-scale processing")
             final_result_np = final_result.clamp(0, 255).byte().cpu().numpy()
             final_result_bgr = cv2.cvtColor(final_result_np, cv2.COLOR_RGB2BGR)
             
-            h_d, hColor, templateWindowSize, searchWindowSize = denoising            
-            print(f"[DEBUG] Denoising parameters: h={h_d}, hColor={hColor}, templateWindowSize={templateWindowSize}, searchWindowSize={searchWindowSize}")
+            h_d, h_color, template_indow_size, search_window_size = denoising            
+            print(f"[DEBUG] Denoising parameters: h={h_d}, h_color={h_color}, template_indow_size={template_indow_size}, search_window_size={search_window_size}")
             
             final_result_bgr = cv2.fastNlMeansDenoisingColored(
                     final_result_bgr,
                     h=h_d,
-                    hColor=hColor,
-                    templateWindowSize=templateWindowSize,
-                    searchWindowSize=searchWindowSize
+                    hColor=h_color,
+                    templateWindowSize=template_indow_size,
+                    searchWindowSize=search_window_size
                 )                
             
             final_result = torch.from_numpy(cv2.cvtColor(final_result_bgr, cv2.COLOR_BGR2RGB)).float().to("cuda")        
@@ -429,8 +456,7 @@ class FlatColorizer:
             final_result = sharpen(final_result, sigma=1.0, strength=sharpen_strength)
 
         # Step 5: Resize back to original dimensions if upscaled
-        if upscale > 1.001:
-                original_h, original_w = cv2.imread(img_path).shape[:2]
+        if upscale > 1.001:                
                 current_h, current_w = final_result.shape[:2]
                 
                 if current_h != original_h or current_w != original_w:
@@ -450,7 +476,7 @@ class FlatColorizer:
                 print(f"[DEBUG] Resizing completed: shape {final_result.shape}")
         
         out_img = final_result.clamp(0, 255).byte().cpu().numpy()
-                
+        torch.cuda.empty_cache()                
         return out_img
 
 # =========================================================
@@ -463,16 +489,12 @@ if __name__ == "__main__":
     start_time = time.time()
     
     def parse_ints(s):
-        try:
-            parts = [int(v) for v in s.split(',')]
-            if len(parts) != 4:
-                print(f"[ERROR] Argument error {s}")
-                print("[INFO] Use default [4,4,5,15]")
-                return [4,4,5,15]              
-            return parts
-        except:
+        parts = [int(v) for v in s.split(',')]
+        if len(parts) != 4:
+            print(f"[ERROR] Argument error {s}")
             print("[INFO] Use default [4,4,5,15]")
-            return [4,4,5,15]        
+            return [4,4,5,15]              
+        return parts   
     
     parser = argparse.ArgumentParser(description="Flat Colorizer with Super-sampling & ESRGAN/RealESRGAN")
     parser.add_argument("--input", required=True, help="Input image path")
