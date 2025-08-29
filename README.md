@@ -7,15 +7,30 @@ This is an experimental app based on personal interests.
 # Gradio
 python flat_color_gradio.py
 
-# Console 
-python flat_color.py
+# Console with post-denoising
+python flat_color_cli.py --input ai.png --output ai_flat_de.png --n_colors 256 --upscale 2.0 --temperature 2.0 --spatial_scale 60 --block_size 768  --model RealESRGAN_x4plus_anime_6B.pth --denoise 3,4,5,15
 ```
 
 # Example 
-| Before | After |
-| --- | --- |
-| <img src="https://github.com/mirabarukaso/flat_color_quantization/blob/main/ai_before.png" width=35%> | <img src="https://github.com/mirabarukaso/flat_color_quantization/blob/main/ai_after.png" width=35%> |
-| <img src="https://github.com/mirabarukaso/flat_color_quantization/blob/main/example_before.png" width=75%> | <img src="https://github.com/mirabarukaso/flat_color_quantization/blob/main/example_after.png" width=75%> |
+| Before | After | After Denoised |
+| --- | --- | --- |
+| <img src="https://github.com/mirabarukaso/flat_color_quantization/blob/main/imgs/ai_before.png" width=35%> | <img src="https://github.com/mirabarukaso/flat_color_quantization/blob/main/imgs/ai_after.png" width=35%> | <img src="https://github.com/mirabarukaso/flat_color_quantization/blob/main/imgs/ai_after_de.png" width=35%> |
+| <img src="https://github.com/mirabarukaso/flat_color_quantization/blob/main/imgs/example_before.png" width=75%> | <img src="https://github.com/mirabarukaso/flat_color_quantization/blob/main/imgs/example_after.png" width=75%> | <img src="https://github.com/mirabarukaso/flat_color_quantization/blob/main/imgs/example_after_de.png" width=75%> |
+| | `--n_colors 256 --upscale 2.0 --temperature 2.0 --spatial_scale 60 --block_size 768  --model RealESRGAN_x4plus_anime_6B.pth` | `--n_colors 256 --upscale 2.0 --temperature 2.0 --spatial_scale 60 --block_size 768  --model RealESRGAN_x4plus_anime_6B.pth --denoise 3,4,5,15` |
+
+| Argument | Default / Recommend Value | Comment |
+| --- | --- | --- |
+| input | | Required |
+| output | | Required |
+| n_colors | 512 (256~4096) | High color count |
+| temperature | 2.0 (1~5) | Higher temperature to enhance soft assignment |
+| spatial_scale | 60 (40~500) | arger spatial weight to promote large region formation |
+| sharpen_strength| Disable (1~2) | Post-sharpen |
+| block_size| 512 (64~1024) | Block processing to save VRAM |
+| upscale | Disable (1.5~8.0) | Upscale input image before GPU soft |
+| upscale_model | Upscale (NMKD/ESRGAN/RealESRGAN) model path (.safetensors/.pth) | Use cv2 fallback resize if not present |
+| denoise | 4,4,5,15 | Pose-denoising before Post-sharpen `h,hColor,templateWindowSize,searchWindowSize` |
+
 
 # Image Color Transfer
 Please refer to [Image Color Transfer](https://github.com/mirabarukaso/ComfyUI_Mira#image-color-transfer) for more details about Image Color Transfer.      
