@@ -6,7 +6,7 @@ from safetensors.torch import load_file
 import numpy as np
 from spandrel import ModelLoader
 
-def kmeans_gpu_soft(x, n_clusters=20, n_iter=10, temperature=1.0):
+def kmeans_gpu_soft(x, n_clusters=20, n_iter=10, temperature=1.0, seed=-1):
     """
     Soft clustering version of K-means, using a temperature parameter to control clustering hardness
     temperature: Lower values result in harder clustering, higher values result in softer clustering
@@ -14,6 +14,10 @@ def kmeans_gpu_soft(x, n_clusters=20, n_iter=10, temperature=1.0):
     with torch.no_grad():
         N, _ = x.shape
         device = x.device
+
+        # Manual seed
+        if int(seed) >= 0:
+            torch.manual_seed(seed)
 
         # Randomly initialize cluster centers
         indices = torch.randperm(N, device=device)[:n_clusters]
@@ -61,7 +65,7 @@ def sharpen(img, sigma=1.0, strength=1.0):
         sharpened = sharpened.squeeze(0).permute(1, 2, 0)
         return sharpened.clamp(0, 255)
 
-def process_block(img_block, n_colors, spatial_scale, scale, temperature, device="cuda"):
+def process_block(img_block, n_colors, spatial_scale, scale, temperature, device="cuda", seed=-1):
     try:
         h, w, _ = img_block.shape
         img_tensor = torch.from_numpy(img_block).float().to(device)
@@ -77,7 +81,7 @@ def process_block(img_block, n_colors, spatial_scale, scale, temperature, device
             yy.reshape(-1, 1).float() / w * spatial_scale * scale
         ], dim=1)
         
-        weights, centers = kmeans_gpu_soft(features, n_clusters=n_colors, temperature=temperature)
+        weights, centers = kmeans_gpu_soft(features, n_clusters=n_colors, temperature=temperature, seed=seed)
         
         rgb_centers = centers[:, :3]
         dist_to_pixels = torch.cdist(rgb_centers, img_flat)
@@ -331,7 +335,7 @@ class FlatColorizer:
     # =========================================================
     # 5. Process GPU soft
     # =========================================================
-    def start_process(self, img_rgb, n_colors, spatial_scale, scales, temperature, block_size):
+    def start_process(self, img_rgb, n_colors, spatial_scale, scales, temperature, block_size, seed=-1):
         h, w, _ = img_rgb.shape
         results = []
 
@@ -365,7 +369,7 @@ class FlatColorizer:
                         print(f"[DEBUG] Processing block {block_count}/{total_blocks}, position ({i},{j}) to ({i_end},{j_end}), size {block.shape[:2]}")
                         
                         # Process block
-                        out_block = process_block(block, n_colors, spatial_scale, scale, temperature)
+                        out_block = process_block(block, n_colors, spatial_scale, scale, temperature, seed=seed)
                         out_block_np = out_block.clamp(0, 255).byte().cpu().numpy()
                         block_results[i:i_end, j:j_end] = out_block_np
                                                 
@@ -379,7 +383,7 @@ class FlatColorizer:
             else:
                 print(f"[INFO] Image size {new_h}x{new_w} within block size, processing directly")
                 # Directly process the entire resized image
-                out = process_block(img_resized, n_colors, spatial_scale, scale, temperature)
+                out = process_block(img_resized, n_colors, spatial_scale, scale, temperature, seed=seed)
                 out_np = out.clamp(0, 255).byte().cpu().numpy()
                 print(f"[DEBUG] Direct processing completed, output shape: {out_np.shape}")
                 out_resized = cv2.resize(out_np, (w, h))
@@ -417,7 +421,8 @@ class FlatColorizer:
         upscale=1.0,
         model_path=None,
         denoising=None,
-        img_rgb=None
+        img_rgb=None,
+        seed=-1
     ):
         try:
             if img_path != None:
@@ -441,7 +446,7 @@ class FlatColorizer:
 
             # Step 2. Call original flat_color's process_block
             scales = [1.0, 0.75, 0.5, 0.25]
-            final_result = self.start_process(img_rgb, n_colors, spatial_scale, scales, temperature, block_size)
+            final_result = self.start_process(img_rgb, n_colors, spatial_scale, scales, temperature, block_size, seed)
                 
             # Step 3. Denoising
             if denoising:
@@ -514,6 +519,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Flat Colorizer with Super-sampling & ESRGAN/RealESRGAN")
     parser.add_argument("--input", required=True, help="Input image path")
     parser.add_argument("--output", required=True, help="Output image path")
+    parser.add_argument("--seed", type=int, default=-1, help="Random Seed")
     parser.add_argument("--n_colors", type=int, default=256, help="Number of High-colors (256-4096)")
     parser.add_argument("--temperature", type=float, default=2.0, help="Soft assignment temperature (<5.0)")
     parser.add_argument("--spatial_scale", type=int, default=60, help="Spatial coordinate weight (40-500)")
@@ -527,6 +533,7 @@ if __name__ == "__main__":
     fc = FlatColorizer()
     out = fc.flat_color_multi_scale(
         args.input,
+        seed=args.seed,
         n_colors=args.n_colors,
         temperature=args.temperature,
         spatial_scale=args.spatial_scale,
