@@ -32,7 +32,7 @@ python flat_color_cli.py --input ai.png --output ai_flat_de.png --n_colors 256 -
     <tr>
       <th>Before</th>
       <th>After</th>
-      <th>After with Denois</th>
+      <th>After with Denoise</th>
     </tr>
   </thead>
   <tbody>
