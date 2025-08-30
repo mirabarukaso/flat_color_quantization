@@ -9,7 +9,7 @@ This is an experimental app based on personal interests.
 python flat_color_gradio.py
 
 # Console with post-denoising
-python flat_color_cli.py --input ai.png --output ai_flat_de.png --n_colors 256 --upscale 2.0 --temperature 2.0 --spatial_scale 60 --block_size 768  --model RealESRGAN_x4plus_anime_6B.pth --denoise 3,4,5,15
+python flat_color_cli.py --input ai.png --output ai_flat_de.png --n_colors 256 --upscale 2.0 --temperature 2.0 --spatial_scale 60 --block_size 768  --upscale_model RealESRGAN_x4plus_anime_6B.pth --denoise 3,4,5,15
 ```
 
 | Argument | Default / Recommend Value | Comment |
