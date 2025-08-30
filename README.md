@@ -16,7 +16,7 @@ python flat_color_cli.py --input ai.png --output ai_flat_de.png --n_colors 256 -
 | --- | --- | --- |
 | input | | Required |
 | output | | Required |
-| n_colors | 512 (256~4096) | High color count |
+| n_colors | 256 (16~4096) | High color count |
 | temperature | 2.0 (1~5) | Higher temperature to enhance soft assignment |
 | spatial_scale | 60 (40~500) | arger spatial weight to promote large region formation |
 | sharpen_strength| Disable (1~2) | Post-sharpen |
