@@ -439,6 +439,7 @@ class FlatColorizer:
     # 3. OpenCV super-sampling
     # =========================================================
     def _cv2_super_sample(self, img_rgb: np.ndarray, scale: float):
+        print(f"[INFO] Using OpenCV super-sampling: {scale}")
         h, w = img_rgb.shape[:2]
         if scale <= 1.0:
             return img_rgb
@@ -462,7 +463,7 @@ class FlatColorizer:
     # 5. Process GPU soft
     # =========================================================
     def process_with_overlap(self, img_rgb, n_colors, spatial_scale, scales, temperature, block_size, seed=-1, algorithm="gmm", overlap_ratio=0.25):
-        """使用重叠分块处理，消除拼接痕迹"""
+        """Process with overlapping blocks to eliminate stitching artifacts"""
         h, w, _ = img_rgb.shape
         results = []
         
@@ -482,7 +483,7 @@ class FlatColorizer:
                 out_resized = cv2.resize(block_results, (w, h))
                 results.append(torch.from_numpy(out_resized).float())
             else:
-                # 直接处理小图
+                # Process small image directly
                 out = process_block(img_resized, n_colors, spatial_scale, scale, temperature, seed=seed, algorithm=algorithm)
                 out_np = out.clamp(0, 255).byte().cpu().numpy()
                 out_resized = cv2.resize(out_np, (w, h))
@@ -495,16 +496,16 @@ class FlatColorizer:
         return final_result
 
     def _process_blocks_with_overlap(self, img_resized, n_colors, spatial_scale, scale, temperature, block_size, overlap_ratio, seed, algorithm):
-        """重叠分块处理核心函数"""
+        """Core function for processing overlapping blocks"""
         h, w, _ = img_resized.shape
         overlap_size = int(block_size * overlap_ratio)
         step_size = block_size - overlap_size
         
-        # 计算需要的块数
+        # Calculate number of blocks
         blocks_h = (h - overlap_size + step_size - 1) // step_size
         blocks_w = (w - overlap_size + step_size - 1) // step_size
         
-        # 创建输出画布和权重画布
+        # Create output canvas and weight canvas
         output_canvas = np.zeros((h, w, 3), dtype=np.float32)
         weight_canvas = np.zeros((h, w), dtype=np.float32)
         
@@ -517,57 +518,57 @@ class FlatColorizer:
             for j in range(blocks_w):
                 block_count += 1
                 
-                # 计算块的位置
+                # Calculate block position
                 start_h = i * step_size
                 end_h = min(start_h + block_size, h)
                 start_w = j * step_size
                 end_w = min(start_w + block_size, w)
                 
-                # 提取块
+                # Extract block
                 block = img_resized[start_h:end_h, start_w:end_w]
                 
                 print(f"[DEBUG] Processing overlapping block {block_count}/{total_blocks}, position ({start_h},{start_w}) to ({end_h},{end_w})")
                 
-                # 处理块
+                # Process block
                 out_block = process_block(block, n_colors, spatial_scale, scale, temperature, seed=seed, algorithm=algorithm)
                 out_block_np = out_block.clamp(0, 255).cpu().numpy().astype(np.float32)
                 
-                # 创建羽化权重（边缘渐变）
+                # Create feather weight mask (edge blending)
                 block_h, block_w = out_block_np.shape[:2]
                 weight_mask = self._create_feather_mask(block_h, block_w, overlap_size)
                 
-                # 累加到输出画布
+                # Accumulate to output canvas
                 output_canvas[start_h:end_h, start_w:end_w] += out_block_np * weight_mask[:, :, np.newaxis]
                 weight_canvas[start_h:end_h, start_w:end_w] += weight_mask
                 
-                # 清理GPU内存
+                # Clear GPU memory
                 torch.cuda.empty_cache()
         
-        # 归一化
-        weight_canvas[weight_canvas == 0] = 1  # 避免除零
+        # Normalize
+        weight_canvas[weight_canvas == 0] = 1  # Avoid division by zero
         final_result = output_canvas / weight_canvas[:, :, np.newaxis]
         
         return final_result.astype(np.uint8)
 
     def _create_feather_mask(self, h, w, overlap_size):
-        """创建羽化权重掩码"""
+        """Create feather weight mask"""
         mask = np.ones((h, w), dtype=np.float32)
         
         if overlap_size > 0:
-            # 创建边缘渐变
+            # Create edge blending
             for i in range(min(overlap_size, h)):
-                # 上边缘
+                # Top edge
                 weight = (i + 1) / (overlap_size + 1)
                 mask[i, :] *= weight
-                # 下边缘
+                # Bottom edge
                 if h - 1 - i >= 0:
                     mask[h - 1 - i, :] *= weight
             
             for j in range(min(overlap_size, w)):
-                # 左边缘
+                # Left edge
                 weight = (j + 1) / (overlap_size + 1)
                 mask[:, j] *= weight
-                # 右边缘
+                # Right edge
                 if w - 1 - j >= 0:
                     mask[:, w - 1 - j] *= weight
         
@@ -660,14 +661,14 @@ class FlatColorizer:
                 final_result_np = final_result.clamp(0, 255).byte().cpu().numpy()
                 final_result_bgr = cv2.cvtColor(final_result_np, cv2.COLOR_RGB2BGR)
                 
-                h_d, h_color, template_indow_size, search_window_size = denoising            
-                print(f"[DEBUG] Denoising parameters: h={h_d}, h_color={h_color}, template_indow_size={template_indow_size}, search_window_size={search_window_size}")
+                h_d, h_color, template_window_size, search_window_size = denoising            
+                print(f"[DEBUG] Denoising parameters: h={h_d}, h_color={h_color}, template_window_size={template_window_size}, search_window_size={search_window_size}")
                 
                 final_result_bgr = cv2.fastNlMeansDenoisingColored(
                         final_result_bgr,
                         h=h_d,
                         hColor=h_color,
-                        templateWindowSize=template_indow_size,
+                        templateWindowSize=template_window_size,
                         searchWindowSize=search_window_size
                     )                
                 
@@ -718,7 +719,7 @@ if __name__ == "__main__":
         parts = [int(v) for v in s.split(',')]
         if len(parts) != 4:
             print(f"[ERROR] Argument error {s}")
-            print("[INFO] Use default [4,4,5,15]")
+            print("[INFO] Using default [4,4,5,15]")
             return [4,4,5,15]              
         return parts   
     

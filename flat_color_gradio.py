@@ -15,6 +15,9 @@ def parse_ints(s):
 def process_image(input_image, n_colors, temperature, spatial_scale, sharpen_strength, block_size, 
                   upscale, upscale_model, denoise, denoise_toggle, color_transfer, random_seed,
                   algorithm, overlap_ratio):
+    import time
+    start_time = time.time()
+    
     if input_image is None:
         return None
 
@@ -67,7 +70,10 @@ def process_image(input_image, n_colors, temperature, spatial_scale, sharpen_str
         elif color_transfer == "Pdf+Regrain":
             processed_img = ct.pdf_transfer(img_arr_ref=input_image, img_arr_in=processed_img, regrain=True)
         del ct
-    
+
+    end_time = time.time()
+    print(f"[INFO] Total time: {end_time - start_time:.2f} seconds")
+
     return processed_img
 
 def denoise_enable(trigger):
