@@ -416,7 +416,7 @@ class FlatColorizer:
             img_bgr = cv2.imread(img_path)
             if img_bgr is None:
                 raise FileNotFoundError(f"Failed to load image: {img_path}")
-            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)        
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
             
         original_h, original_w = img_rgb.shape[:2]
 
@@ -425,7 +425,11 @@ class FlatColorizer:
             if upscale > 8:
                 upscale = 8
                 print(f"[INFO] Upscale too big, reset to: {upscale}")
-            img_rgb = self.super_sample(img_rgb, upscale, model_path)
+            # Apply a light denoising step before super-sampling to ensure the input to the neural model is clean.
+            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+            img_smoothed = cv2.GaussianBlur(img_bgr, (3, 3), 1, cv2.BORDER_REPLICATE) # sigma 1.0
+            img_rgb = cv2.cvtColor(img_smoothed, cv2.COLOR_BGR2RGB)
+            img_rgb = self.super_sample(img_rgb, upscale, model_path)            
 
         # Step 2. Call original flat_color's process_block
         scales = [1.0, 0.75, 0.5, 0.25]
