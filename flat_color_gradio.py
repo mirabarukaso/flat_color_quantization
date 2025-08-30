@@ -11,7 +11,8 @@ def parse_ints(s):
         return [4,4,5,15]
     return parts
 
-def process_image(input_image, n_colors, temperature, spatial_scale, sharpen_strength, block_size, upscale, upscale_model, denoise, color_transfer):
+def process_image(input_image, n_colors, temperature, spatial_scale, sharpen_strength, block_size, 
+                  upscale, upscale_model, denoise, denoise_toggle, color_transfer):
     if input_image is None:
         return None
 
@@ -24,6 +25,10 @@ def process_image(input_image, n_colors, temperature, spatial_scale, sharpen_str
 
     path = Path(upscale_model)
     path_str = str(path.as_posix()).replace('"','')
+    
+    denoise = parse_ints(denoise) if denoise else None
+    if not denoise_toggle:
+        denoise = None        
 
     # Process image using FlatColorizer's flat_color_multi_scale
     processed_img = fc.flat_color_multi_scale(
@@ -36,7 +41,7 @@ def process_image(input_image, n_colors, temperature, spatial_scale, sharpen_str
         block_size=block_size,
         upscale=upscale,
         model_path=path_str,
-        denoising=parse_ints(denoise) if denoise else None
+        denoising=denoise
     )
     
     if color_transfer != "None":
@@ -96,6 +101,7 @@ with gr.Blocks() as demo:
             upscale,
             upscale_model,
             denoise,
+            denoise_toggle,
             color_transfer
         ],
         outputs=output_image
