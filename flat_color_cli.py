@@ -62,36 +62,38 @@ def sharpen(img, sigma=1.0, strength=1.0):
         return sharpened.clamp(0, 255)
 
 def process_block(img_block, n_colors, spatial_scale, scale, temperature, device="cuda"):
-    """Process a single image block with clustering and reconstruction"""
-    h, w, _ = img_block.shape
-    img_tensor = torch.from_numpy(img_block).float().to(device)
-    img_flat = img_tensor.reshape(-1, 3)
-    
-    # Spatial features
-    xx, yy = torch.meshgrid(torch.arange(h, device=device),
-                            torch.arange(w, device=device),
-                            indexing="ij")
-    
-    features = torch.cat([
-        img_flat,
-        xx.reshape(-1, 1).float() / h * spatial_scale * scale,
-        yy.reshape(-1, 1).float() / w * spatial_scale * scale
-    ], dim=1)
-    
-    # Clustering
-    weights, centers = kmeans_gpu_soft(features, n_clusters=n_colors, temperature=temperature)
-    
-    # Reconstruction
-    rgb_centers = centers[:, :3]
-    dist_to_pixels = torch.cdist(rgb_centers, img_flat)
-    closest_pixel_indices = dist_to_pixels.argmin(dim=1)
-    new_colors = img_flat[closest_pixel_indices]
-    
-    out_flat = torch.mm(weights, new_colors)
-    out = out_flat.reshape(h, w, 3)
-    
-    del img_flat, xx, yy, features, weights, centers, dist_to_pixels, closest_pixel_indices, out_flat  # Free memory
-    return out
+    try:
+        h, w, _ = img_block.shape
+        img_tensor = torch.from_numpy(img_block).float().to(device)
+        img_flat = img_tensor.reshape(-1, 3)
+        
+        xx, yy = torch.meshgrid(torch.arange(h, device=device),
+                              torch.arange(w, device=device),
+                              indexing="ij")
+        
+        features = torch.cat([
+            img_flat,
+            xx.reshape(-1, 1).float() / h * spatial_scale * scale,
+            yy.reshape(-1, 1).float() / w * spatial_scale * scale
+        ], dim=1)
+        
+        weights, centers = kmeans_gpu_soft(features, n_clusters=n_colors, temperature=temperature)
+        
+        rgb_centers = centers[:, :3]
+        dist_to_pixels = torch.cdist(rgb_centers, img_flat)
+        closest_pixel_indices = dist_to_pixels.argmin(dim=1)
+        new_colors = img_flat[closest_pixel_indices]
+        
+        out_flat = torch.mm(weights, new_colors)
+        out = out_flat.reshape(h, w, 3)
+        
+        return out
+    finally:
+        # Ensure cleanup
+        for var in ['img_tensor', 'img_flat', 'xx', 'yy', 'features', 'weights', 'centers', 'dist_to_pixels', 'closest_pixel_indices', 'new_colors', 'out_flat']:
+            if var in locals():
+                del locals()[var]
+        torch.cuda.empty_cache()
 
 class FlatColorizer:
     def __init__(self, device=None):
@@ -386,13 +388,18 @@ class FlatColorizer:
         
         # Combine multi-scale results
         final_result = sum(results) / len(results)
-        final_result = final_result.to("cuda") if self.device == "cuda" else final_result
         return final_result
     
     # =========================================================
     # 6. Main processing 
     # =========================================================
-    def unload_model(self):
+    def print_vram_usage(self):
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**2
+            reserved = torch.cuda.memory_reserved() / 1024**2
+            print(f"[DEBUG] VRAM: Allocated {allocated:.2f} MB, Reserved {reserved:.2f} MB")
+            
+    def unload_model(self):        
         if self.upscale_model is not None:
             self.upscale_model = None
             self.model_scale = None
@@ -412,76 +419,80 @@ class FlatColorizer:
         denoising=None,
         img_rgb=None
     ):
-        if img_path != None:
-            img_bgr = cv2.imread(img_path)
-            if img_bgr is None:
-                raise FileNotFoundError(f"Failed to load image: {img_path}")
-            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-            
-        original_h, original_w = img_rgb.shape[:2]
-
-        # Step 1. Super-sampling        
-        if upscale > 1.001:
-            if upscale > 8:
-                upscale = 8
-                print(f"[INFO] Upscale too big, reset to: {upscale}")
-            # Apply a light denoising step before super-sampling to ensure the input to the neural model is clean.
-            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-            img_smoothed = cv2.GaussianBlur(img_bgr, (3, 3), 1, cv2.BORDER_REPLICATE) # sigma 1.0
-            img_rgb = cv2.cvtColor(img_smoothed, cv2.COLOR_BGR2RGB)
-            img_rgb = self.super_sample(img_rgb, upscale, model_path)            
-
-        # Step 2. Call original flat_color's process_block
-        scales = [1.0, 0.75, 0.5, 0.25]
-        final_result = self.start_process(img_rgb, n_colors, spatial_scale, scales, temperature, block_size)
-            
-        # Step 3. Denoising
-        if denoising:
-            print("[INFO] Applying denoising after multi-scale processing")
-            final_result_np = final_result.clamp(0, 255).byte().cpu().numpy()
-            final_result_bgr = cv2.cvtColor(final_result_np, cv2.COLOR_RGB2BGR)
-            
-            h_d, h_color, template_indow_size, search_window_size = denoising            
-            print(f"[DEBUG] Denoising parameters: h={h_d}, h_color={h_color}, template_indow_size={template_indow_size}, search_window_size={search_window_size}")
-            
-            final_result_bgr = cv2.fastNlMeansDenoisingColored(
-                    final_result_bgr,
-                    h=h_d,
-                    hColor=h_color,
-                    templateWindowSize=template_indow_size,
-                    searchWindowSize=search_window_size
-                )                
-            
-            final_result = torch.from_numpy(cv2.cvtColor(final_result_bgr, cv2.COLOR_BGR2RGB)).float().to("cuda")        
-        
-        # Step 4. Post-processing - Sharpening    
-        if sharpen_strength > 0.001:
-            print(f"[INFO] Applying sharpening with strength: {sharpen_strength}")
-            final_result = sharpen(final_result, sigma=1.0, strength=sharpen_strength)
-
-        # Step 5: Resize back to original dimensions if upscaled
-        if upscale > 1.001:                
-                current_h, current_w = final_result.shape[:2]
+        try:
+            if img_path != None:
+                img_bgr = cv2.imread(img_path)
+                if img_bgr is None:
+                    raise FileNotFoundError(f"Failed to load image: {img_path}")
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
                 
-                if current_h != original_h or current_w != original_w:
-                    print(f"[INFO] Resizing result from {current_h}x{current_w} back to original dimensions {original_h}x{original_w}")
-                    final_result_float = final_result.float() / 255.0
-                    final_result_float = final_result_float.permute(2, 0, 1).unsqueeze(0)
-                    final_result_resized = F.interpolate(
-                        final_result_float,
-                        size=(original_h, original_w),
-                        mode='bicubic',
-                        align_corners=False,
-                        antialias=True
-                    )
-                    final_result_resized = final_result_resized.squeeze(0).permute(1, 2, 0)
-                    final_result = (final_result_resized * 255.0).clamp(0, 255)
+            original_h, original_w = img_rgb.shape[:2]
+
+            # Step 1. Super-sampling        
+            if upscale > 1.001:
+                if upscale > 8:
+                    upscale = 8
+                    print(f"[INFO] Upscale too big, reset to: {upscale}")
+                # Apply a light denoising step before super-sampling to ensure the input to the neural model is clean.
+                img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+                img_smoothed = cv2.GaussianBlur(img_bgr, (3, 3), 1, cv2.BORDER_REPLICATE) # sigma 1.0
+                img_rgb = cv2.cvtColor(img_smoothed, cv2.COLOR_BGR2RGB)
+                img_rgb = self.super_sample(img_rgb, upscale, model_path)            
+
+            # Step 2. Call original flat_color's process_block
+            scales = [1.0, 0.75, 0.5, 0.25]
+            final_result = self.start_process(img_rgb, n_colors, spatial_scale, scales, temperature, block_size)
                 
-                print(f"[DEBUG] Resizing completed: shape {final_result.shape}")
-        
-        out_img = final_result.clamp(0, 255).byte().cpu().numpy()
-        torch.cuda.empty_cache()                
-        return out_img
+            # Step 3. Denoising
+            if denoising:
+                print("[INFO] Applying denoising after multi-scale processing")
+                final_result_np = final_result.clamp(0, 255).byte().cpu().numpy()
+                final_result_bgr = cv2.cvtColor(final_result_np, cv2.COLOR_RGB2BGR)
+                
+                h_d, h_color, template_indow_size, search_window_size = denoising            
+                print(f"[DEBUG] Denoising parameters: h={h_d}, h_color={h_color}, template_indow_size={template_indow_size}, search_window_size={search_window_size}")
+                
+                final_result_bgr = cv2.fastNlMeansDenoisingColored(
+                        final_result_bgr,
+                        h=h_d,
+                        hColor=h_color,
+                        templateWindowSize=template_indow_size,
+                        searchWindowSize=search_window_size
+                    )                
+                
+                final_result = torch.from_numpy(cv2.cvtColor(final_result_bgr, cv2.COLOR_BGR2RGB)).float().to("cuda")        
+            
+            # Step 4. Post-processing - Sharpening    
+            if sharpen_strength > 0.001:
+                print(f"[INFO] Applying sharpening with strength: {sharpen_strength}")
+                final_result = sharpen(final_result, sigma=1.0, strength=sharpen_strength)
+
+            # Step 5: Resize back to original dimensions if upscaled
+            if upscale > 1.001:                
+                    current_h, current_w = final_result.shape[:2]
+                    
+                    if current_h != original_h or current_w != original_w:
+                        print(f"[INFO] Resizing result from {current_h}x{current_w} back to original dimensions {original_h}x{original_w}")
+                        final_result_float = final_result.float() / 255.0
+                        final_result_float = final_result_float.permute(2, 0, 1).unsqueeze(0)
+                        final_result_resized = F.interpolate(
+                            final_result_float,
+                            size=(original_h, original_w),
+                            mode='bicubic',
+                            align_corners=False,
+                            antialias=True
+                        )
+                        final_result_resized = final_result_resized.squeeze(0).permute(1, 2, 0)
+                        final_result = (final_result_resized * 255.0).clamp(0, 255)
+                    
+                    print(f"[DEBUG] Resizing completed: shape {final_result.shape}")
+            
+            out_img = final_result.clamp(0, 255).byte().cpu().numpy()
+            torch.cuda.empty_cache()                
+            return out_img
+        finally:
+            self.unload_model()
+            self.print_vram_usage()
 
 # =========================================================
 # CLI entry
