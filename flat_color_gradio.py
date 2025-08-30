@@ -13,7 +13,8 @@ def parse_ints(s):
     return parts
 
 def process_image(input_image, n_colors, temperature, spatial_scale, sharpen_strength, block_size, 
-                  upscale, upscale_model, denoise, denoise_toggle, color_transfer, random_seed):
+                  upscale, upscale_model, denoise, denoise_toggle, color_transfer, random_seed,
+                  algorithm, overlap_ratio):
     if input_image is None:
         return None
 
@@ -49,7 +50,9 @@ def process_image(input_image, n_colors, temperature, spatial_scale, sharpen_str
         block_size=block_size,
         upscale=upscale,
         model_path=path_str,
-        denoising=denoise
+        denoising=denoise,
+        algorithm=algorithm,
+        overlap_ratio=overlap_ratio
     )
     del fc
     
@@ -74,18 +77,23 @@ with gr.Blocks() as demo:
     gr.Markdown("# Flat Color Multi-Scale Image Processing")
     with gr.Row():
         with gr.Column():
-            n_colors = gr.Slider(minimum=16, maximum=4096, value=256, step=16, label="Color Count (More colors = more VRAM)")
-            block_size = gr.Slider(minimum=64, maximum=1024, value=512, step=64, label="Tiled Processing Block Size")
-            upscale = gr.Slider(minimum=1.0, maximum=8.0, value=1.0, step=0.1, label="Super-Sampling Scale (1.0=disabled, max 8.0)")
-            upscale_model = gr.Textbox(label="Upscale Model Path (.safetensors/.pth)", placeholder="Full Path to ESRGAN/RealESRGAN model", value="")
-            color_transfer = gr.Dropdown(choices=["Mean", "Lab", "Pdf", "Pdf+Regrain", "None"], value="None", label="Image Color Transfer")
-        with gr.Column():
-            random_seed = gr.Slider(minimum=-1, maximum=2**32, value=-1, step=1, label="Random Seed")
+            with gr.Row():
+                n_colors = gr.Slider(minimum=16, maximum=4096, value=256, step=16, label="Color Count (More colors = more VRAM)")
+                block_size = gr.Slider(minimum=64, maximum=1024, value=512, step=64, label="Tiled Processing Block Size")
             with gr.Row():
                 temperature = gr.Slider(minimum=1.0, maximum=5.0, value=2.0, step=0.1, label="Temperature (Soft Assignment)")
-                spatial_scale = gr.Slider(minimum=10, maximum=500, value=60, step=10, label="Spatial Scale")
-            sharpen_strength = gr.Slider(minimum=0.0, maximum=3.0, value=0.0, step=0.05, label="Sharpen Strength (0=disabled)")
-            denoise = gr.Textbox(label="Denoising Parameters [h,hColor,templateWindowSize,searchWindowSize] e.g.[4,4,5,15] or [5,7,5,21] ", placeholder="e.g., 4,4,5,15", value="4,4,5,15")
+                spatial_scale = gr.Slider(minimum=10, maximum=500, value=60, step=10, label="Spatial Scale")            
+            upscale = gr.Slider(minimum=1.0, maximum=8.0, value=1.0, step=0.1, label="Super-Sampling Scale (1.0=disabled, max 8.0)")            
+            upscale_model = gr.Textbox(label="Optional Upscale Model Path (.pth)", placeholder="Full Path to ESRGAN/RealESRGAN model", value="")
+            color_transfer = gr.Dropdown(choices=["Mean", "Lab", "Pdf", "Pdf+Regrain", "None"], value="None", label="Image Color Transfer")
+        with gr.Column():
+            with gr.Row():
+                random_seed = gr.Slider(minimum=-1, maximum=2**32, value=-1, step=1, label="Random Seed")
+                sharpen_strength = gr.Slider(minimum=0.0, maximum=3.0, value=0.0, step=0.05, label="Sharpen Strength (0=disabled)")            
+            overlap_ratio = gr.Slider(minimum=0.1, maximum=0.5, value=0.2, step=0.05, label="Block overlap ratio (0.1-0.5)")
+            with gr.Row():
+                algorithm = gr.Radio(choices=["kmeans", "fcm", "gmm"], value="kmeans", label="Clustering algorithm: 'kmeans' (Soft K-Means) or 'fcm' (Fuzzy C-Means) or 'gmm' (Gaussian Mixture Model)")
+            denoise = gr.Textbox(label="Denoising Parameters [h,hColor,templateWindowSize,searchWindowSize] [4,4,5,15]/[5,7,5,21]/[5,9,7,27] ", placeholder="e.g., 4,4,5,15", value="4,4,5,15")
             denoise_toggle = gr.Checkbox(label="Enable Denoising", value=False)            
     with gr.Row():
         process_button = gr.Button("Start Processing", variant="primary")
@@ -115,7 +123,9 @@ with gr.Blocks() as demo:
             denoise,
             denoise_toggle,
             color_transfer,
-            random_seed
+            random_seed,
+            algorithm,
+            overlap_ratio
         ],
         outputs=output_image
     )

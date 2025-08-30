@@ -6,7 +6,128 @@ from safetensors.torch import load_file
 import numpy as np
 from spandrel import ModelLoader
 
-def kmeans_gpu_soft(x, n_clusters=20, n_iter=10, temperature=1.0, seed=-1):
+def gmm_gpu(x, n_clusters=20, n_iter=10, temperature=1.0, seed=-1):
+    """
+    Gaussian Mixture Model clustering on GPU.
+    temperature: Controls the sharpness of the probability assignments
+    """
+    with torch.no_grad():
+        N, D = x.shape
+        device = x.device
+        
+        if int(seed) >= 0:
+            torch.manual_seed(seed)
+        
+        # Initialize parameters
+        # Means: random selection from data points
+        indices = torch.randperm(N, device=device)[:n_clusters]
+        means = x[indices].clone()
+        
+        # Diagonal covariances for speed (assume feature independence)
+        data_var = torch.var(x, dim=0)  # [D] - per-dimension variance
+        covs = data_var.unsqueeze(0).repeat(n_clusters, 1)  # [K, D] diagonal only
+        
+        # Mixing coefficients: uniform
+        pi = torch.ones(n_clusters, device=device) / n_clusters
+        
+        for iteration in range(n_iter):
+            # E-step: compute responsibilities
+            log_probs = torch.zeros(N, n_clusters, device=device)
+            
+            for k in range(n_clusters):
+                diff = x - means[k]  # [N, D]
+                
+                # Fast diagonal covariance computation
+                var_k = covs[k]  # [D] diagonal elements only
+                mahal_dist = torch.sum(diff**2 / (var_k + 1e-6), dim=1)  # [N]
+                log_det = torch.sum(torch.log(var_k + 1e-6))
+                
+                log_probs[:, k] = torch.log(pi[k] + 1e-8) - 0.5 * (
+                    D * torch.log(torch.tensor(2 * torch.pi, device=device)) + 
+                    log_det + 
+                    mahal_dist / temperature
+                )
+            
+            # Numerical stability: subtract max
+            log_probs_max = torch.max(log_probs, dim=1, keepdim=True)[0]
+            log_probs = log_probs - log_probs_max
+            
+            # Convert to responsibilities (soft assignments)
+            responsibilities = torch.exp(log_probs)
+            responsibilities = responsibilities / (responsibilities.sum(dim=1, keepdim=True) + 1e-8)
+            
+            # Check for NaN/Inf
+            if torch.isnan(responsibilities).any() or torch.isinf(responsibilities).any():
+                print(f"[WARNING] GMM: Invalid responsibilities at iteration {iteration}, resetting")
+                responsibilities = torch.ones_like(responsibilities) / n_clusters
+            
+            # M-step: update parameters
+            Nk = responsibilities.sum(dim=0)  # [K]
+            
+            # Update mixing coefficients
+            pi = Nk / N
+            
+            # Update means
+            for k in range(n_clusters):
+                if Nk[k] > 1e-6:
+                    means[k] = torch.sum(responsibilities[:, k:k+1] * x, dim=0) / Nk[k]
+            
+            # Update covariances (diagonal only for speed)
+            for k in range(n_clusters):
+                if Nk[k] > 1:  # Need at least 1 point
+                    diff = x - means[k]
+                    weighted_var = torch.sum(responsibilities[:, k:k+1] * diff**2, dim=0) / Nk[k]
+                    
+                    # Add small regularization
+                    covs[k] = weighted_var + data_var * 0.01
+        
+        return responsibilities, means
+
+    
+def fcm_gpu(x, n_clusters=20, n_iter=10, m=2.0, seed=-1):
+    """
+    Fuzzy C-Means clustering on GPU.
+    m: Fuzziness parameter (>1.0); higher values increase fuzziness (repurposed from temperature).
+    """
+    with torch.no_grad():
+        N, _ = x.shape
+        device = x.device
+
+        # Clamp m to avoid numerical instability (m >= 1.1)
+        m = max(float(m), 1.1)
+
+        if int(seed) >= 0:
+            torch.manual_seed(seed)
+
+        # Initialize centers randomly
+        indices = torch.randperm(N, device=device)[:n_clusters]
+        centers = x[indices]
+
+        for _ in range(n_iter):
+            # Compute distances and normalize to prevent overflow
+            dist = torch.cdist(x, centers)  # [N, K]
+            dist = dist.clamp(min=1e-8)  # Avoid division by zero
+            dist = dist / (dist.max(dim=1, keepdim=True)[0] + 1e-8)  # Normalize distances
+
+            # Compute membership degrees (u_ik)
+            dist_pow = dist ** (-2 / (m - 1))  # [N, K]
+            dist_pow = dist_pow.clamp(max=1e10)  # Prevent overflow
+            weights = dist_pow / (dist_pow.sum(dim=1, keepdim=True) + 1e-8)  # [N, K]
+
+            # Check for invalid weights
+            if torch.isnan(weights).any() or torch.isinf(weights).any():
+                print(f"[WARNING] FCM: Invalid weights detected at iteration {_}, resetting to uniform")
+                weights = torch.ones_like(weights) / n_clusters
+
+            # Update centers
+            weights_pow_m = weights ** m  # [N, K]
+            new_centers = torch.mm(weights_pow_m.T, x) / (weights_pow_m.sum(dim=0, keepdim=True).T + 1e-8)
+            centers = new_centers
+            del dist, dist_pow, weights_pow_m  # Free memory
+
+        return weights, centers
+    
+def kmeans_gpu_soft(x, n_clusters=20, n_iter=10, temperature=1.0, epsilon=1e-8, seed=-1):
     """
     Soft clustering version of K-means, using a temperature parameter to control clustering hardness
     temperature: Lower values result in harder clustering, higher values result in softer clustering
@@ -29,7 +150,7 @@ def kmeans_gpu_soft(x, n_clusters=20, n_iter=10, temperature=1.0, seed=-1):
             weights = F.softmax(-dist / temperature, dim=1)  # [N, K]
             
             # Recalculate centers based on soft assignments
-            new_centers = torch.mm(weights.T, x) / (weights.sum(dim=0, keepdim=True).T + 1e-8)
+            new_centers = torch.mm(weights.T, x) / (weights.sum(dim=0, keepdim=True).T + epsilon)
             centers = new_centers
             del dist  # Explicitly free memory
         
@@ -65,15 +186,15 @@ def sharpen(img, sigma=1.0, strength=1.0):
         sharpened = sharpened.squeeze(0).permute(1, 2, 0)
         return sharpened.clamp(0, 255)
 
-def process_block(img_block, n_colors, spatial_scale, scale, temperature, device="cuda", seed=-1):
+def process_block(img_block, n_colors, spatial_scale, scale, temperature, device="cuda", seed=-1, algorithm="kmeans"):
     try:
         h, w, _ = img_block.shape
         img_tensor = torch.from_numpy(img_block).float().to(device)
         img_flat = img_tensor.reshape(-1, 3)
         
         xx, yy = torch.meshgrid(torch.arange(h, device=device),
-                              torch.arange(w, device=device),
-                              indexing="ij")
+                                torch.arange(w, device=device),
+                                indexing="ij")
         
         features = torch.cat([
             img_flat,
@@ -81,7 +202,12 @@ def process_block(img_block, n_colors, spatial_scale, scale, temperature, device
             yy.reshape(-1, 1).float() / w * spatial_scale * scale
         ], dim=1)
         
-        weights, centers = kmeans_gpu_soft(features, n_clusters=n_colors, temperature=temperature, seed=seed)
+        if algorithm == "gmm":
+            weights, centers = gmm_gpu(features, n_clusters=n_colors, temperature=temperature, seed=seed)
+        elif algorithm == "fcm":
+            weights, centers = fcm_gpu(features, n_clusters=n_colors, m=temperature, seed=seed)
+        else:  # Default to kmeans
+            weights, centers = kmeans_gpu_soft(features, n_clusters=n_colors, temperature=temperature, seed=seed)
         
         rgb_centers = centers[:, :3]
         dist_to_pixels = torch.cdist(rgb_centers, img_flat)
@@ -93,7 +219,7 @@ def process_block(img_block, n_colors, spatial_scale, scale, temperature, device
         
         return out
     finally:
-        # Ensure cleanup
+        # Ensure cleanup (existing code remains)
         for var in ['img_tensor', 'img_flat', 'xx', 'yy', 'features', 'weights', 'centers', 'dist_to_pixels', 'closest_pixel_indices', 'new_colors', 'out_flat']:
             if var in locals():
                 del locals()[var]
@@ -335,63 +461,126 @@ class FlatColorizer:
     # =========================================================
     # 5. Process GPU soft
     # =========================================================
-    def start_process(self, img_rgb, n_colors, spatial_scale, scales, temperature, block_size, seed=-1):
+    def process_with_overlap(self, img_rgb, n_colors, spatial_scale, scales, temperature, block_size, seed=-1, algorithm="gmm", overlap_ratio=0.25):
+        """使用重叠分块处理，消除拼接痕迹"""
         h, w, _ = img_rgb.shape
         results = []
-
-        print(f"[INFO] Starting multi-scale processing with scales: {scales}")
-        print(f"[DEBUG] Input image dimensions: {h}x{w}")
-
+        
+        print(f"[INFO] Using overlap processing with ratio: {overlap_ratio}")
+        
         for scale in scales:
-            # Resize image
             new_h, new_w = int(h * scale), int(w * scale)
             print(f"[DEBUG] Processing scale {scale}, resizing to {new_h}x{new_w}")
             img_resized = cv2.resize(img_rgb, (new_w, new_h))
             
-            # Check if block processing is needed
             if new_h > block_size or new_w > block_size:
-                print(f"[INFO] Image size {new_h}x{new_w} exceeds block size {block_size}, using block processing")
-                block_results = np.zeros((new_h, new_w, 3), dtype=np.uint8)
-                step_h = block_size
-                step_w = block_size
-                
-                total_blocks = ((new_h - 1) // step_h + 1) * ((new_w - 1) // step_w + 1)
-                block_count = 0
-                
-                for i in range(0, new_h, step_h):
-                    for j in range(0, new_w, step_w):
-                        block_count += 1
-                        # Extract block, slightly expand boundaries to avoid seams
-                        i_end = min(i + step_h, new_h)
-                        j_end = min(j + step_w, new_w)
-                        block = img_resized[i:i_end, j:j_end]
-                        
-                        print(f"[DEBUG] Processing block {block_count}/{total_blocks}, position ({i},{j}) to ({i_end},{j_end}), size {block.shape[:2]}")
-                        
-                        # Process block
-                        out_block = process_block(block, n_colors, spatial_scale, scale, temperature, seed=seed)
-                        out_block_np = out_block.clamp(0, 255).byte().cpu().numpy()
-                        block_results[i:i_end, j:j_end] = out_block_np
-                                                
-                        # Clear GPU memory
-                        torch.cuda.empty_cache()
-                
-                print(f"[DEBUG] Resizing block results to original dimensions: {w}x{h}")
+                print(f"[INFO] Using overlap block processing for size {new_h}x{new_w}")
+                block_results = self._process_blocks_with_overlap(
+                    img_resized, n_colors, spatial_scale, scale, temperature, 
+                    block_size, overlap_ratio, seed, algorithm
+                )
                 out_resized = cv2.resize(block_results, (w, h))
-                results.append(torch.from_numpy(out_resized).float())  # Keep on CPU
-                print(f"[DEBUG] Appended block-processed result, shape: {out_resized.shape}")
+                results.append(torch.from_numpy(out_resized).float())
             else:
-                print(f"[INFO] Image size {new_h}x{new_w} within block size, processing directly")
-                # Directly process the entire resized image
-                out = process_block(img_resized, n_colors, spatial_scale, scale, temperature, seed=seed)
+                # 直接处理小图
+                out = process_block(img_resized, n_colors, spatial_scale, scale, temperature, seed=seed, algorithm=algorithm)
                 out_np = out.clamp(0, 255).byte().cpu().numpy()
-                print(f"[DEBUG] Direct processing completed, output shape: {out_np.shape}")
                 out_resized = cv2.resize(out_np, (w, h))
-                results.append(torch.from_numpy(out_resized).float())  # Keep on CPU
-                print(f"[DEBUG] Appended direct-processed result, shape: {out_resized.shape}")
+                results.append(torch.from_numpy(out_resized).float())
+            
+            if seed != -1:
+                seed = seed + 1
         
-        # Combine multi-scale results
         final_result = sum(results) / len(results)
+        return final_result
+
+    def _process_blocks_with_overlap(self, img_resized, n_colors, spatial_scale, scale, temperature, block_size, overlap_ratio, seed, algorithm):
+        """重叠分块处理核心函数"""
+        h, w, _ = img_resized.shape
+        overlap_size = int(block_size * overlap_ratio)
+        step_size = block_size - overlap_size
+        
+        # 计算需要的块数
+        blocks_h = (h - overlap_size + step_size - 1) // step_size
+        blocks_w = (w - overlap_size + step_size - 1) // step_size
+        
+        # 创建输出画布和权重画布
+        output_canvas = np.zeros((h, w, 3), dtype=np.float32)
+        weight_canvas = np.zeros((h, w), dtype=np.float32)
+        
+        print(f"[DEBUG] Processing {blocks_h}x{blocks_w} overlapping blocks")
+        
+        block_count = 0
+        total_blocks = blocks_h * blocks_w
+        
+        for i in range(blocks_h):
+            for j in range(blocks_w):
+                block_count += 1
+                
+                # 计算块的位置
+                start_h = i * step_size
+                end_h = min(start_h + block_size, h)
+                start_w = j * step_size
+                end_w = min(start_w + block_size, w)
+                
+                # 提取块
+                block = img_resized[start_h:end_h, start_w:end_w]
+                
+                print(f"[DEBUG] Processing overlapping block {block_count}/{total_blocks}, position ({start_h},{start_w}) to ({end_h},{end_w})")
+                
+                # 处理块
+                out_block = process_block(block, n_colors, spatial_scale, scale, temperature, seed=seed, algorithm=algorithm)
+                out_block_np = out_block.clamp(0, 255).cpu().numpy().astype(np.float32)
+                
+                # 创建羽化权重（边缘渐变）
+                block_h, block_w = out_block_np.shape[:2]
+                weight_mask = self._create_feather_mask(block_h, block_w, overlap_size)
+                
+                # 累加到输出画布
+                output_canvas[start_h:end_h, start_w:end_w] += out_block_np * weight_mask[:, :, np.newaxis]
+                weight_canvas[start_h:end_h, start_w:end_w] += weight_mask
+                
+                # 清理GPU内存
+                torch.cuda.empty_cache()
+        
+        # 归一化
+        weight_canvas[weight_canvas == 0] = 1  # 避免除零
+        final_result = output_canvas / weight_canvas[:, :, np.newaxis]
+        
+        return final_result.astype(np.uint8)
+
+    def _create_feather_mask(self, h, w, overlap_size):
+        """创建羽化权重掩码"""
+        mask = np.ones((h, w), dtype=np.float32)
+        
+        if overlap_size > 0:
+            # 创建边缘渐变
+            for i in range(min(overlap_size, h)):
+                # 上边缘
+                weight = (i + 1) / (overlap_size + 1)
+                mask[i, :] *= weight
+                # 下边缘
+                if h - 1 - i >= 0:
+                    mask[h - 1 - i, :] *= weight
+            
+            for j in range(min(overlap_size, w)):
+                # 左边缘
+                weight = (j + 1) / (overlap_size + 1)
+                mask[:, j] *= weight
+                # 右边缘
+                if w - 1 - j >= 0:
+                    mask[:, w - 1 - j] *= weight
+        
+        return mask
+
+    def start_process(self, img_rgb, n_colors, spatial_scale, scales, temperature, block_size, seed=-1, algorithm="kmeans", overlap_ratio=0.3):
+        h, w, _ = img_rgb.shape
+
+        print(f"[INFO] Starting multi-scale processing with scales: {scales}")
+        print(f"[DEBUG] Input image dimensions: {h}x{w}")
+
+        final_result = self.process_with_overlap(img_rgb, n_colors, spatial_scale, scales, temperature, block_size, seed, algorithm, overlap_ratio)
+        
         return final_result
     
     # =========================================================
@@ -422,9 +611,15 @@ class FlatColorizer:
         model_path=None,
         denoising=None,
         img_rgb=None,
-        seed=-1
+        seed=-1,
+        algorithm="kmeans",
+        overlap_ratio=0.3
     ):
         try:
+            if algorithm == "fcm" and temperature < 1.1:
+                print(f"[WARNING] FCM requires temperature >= 1.1 to avoid numerical instability; adjusting to 1.1")
+                temperature = max(temperature, 1.1)
+            
             if img_path != None:
                 img_bgr = cv2.imread(img_path)
                 if img_bgr is None:
@@ -446,7 +641,18 @@ class FlatColorizer:
 
             # Step 2. Call original flat_color's process_block
             scales = [1.0, 0.75, 0.5, 0.25]
-            final_result = self.start_process(img_rgb, n_colors, spatial_scale, scales, temperature, block_size, seed)
+            print(f"[INFO] Start process, algorithm: {algorithm}")
+            final_result = self.start_process(
+                img_rgb=img_rgb, 
+                n_colors=n_colors, 
+                spatial_scale=spatial_scale, 
+                scales=scales, 
+                temperature=temperature, 
+                block_size=block_size, 
+                seed=seed, 
+                algorithm=algorithm, 
+                overlap_ratio=overlap_ratio
+            )
                 
             # Step 3. Denoising
             if denoising:
@@ -527,7 +733,9 @@ if __name__ == "__main__":
     parser.add_argument("--block_size", type=int, default=512, help="Block size")
     parser.add_argument("--upscale", type=float, default=1.0, help="Super-sampling scale (1.0=disabled, max 3.0)")
     parser.add_argument("--upscale_model", type=str, default=None, help="Upscale (NMKD/ESRGAN/RealESRGAN) model path (.safetensors/.pth)")
-    parser.add_argument("--denoise", type=parse_ints, help="Enable post-denoising [4,4,5,15]/[5,7,5,21]")
+    parser.add_argument("--denoise", type=parse_ints, help="Enable post-denoising [4,4,5,15]/[5,7,5,21]/[5,9,7,27]")
+    parser.add_argument("--algorithm", type=str, default="kmeans", choices=["kmeans", "fcm", "gmm"], help="Clustering algorithm: 'kmeans' (soft K-Means) or 'fcm' (Fuzzy C-Means)")
+    parser.add_argument("--overlap_ratio", type=float, default=0.2, help="Block overlap ratio (0.1-0.5)")
     args = parser.parse_args()
     
     fc = FlatColorizer()
@@ -541,7 +749,9 @@ if __name__ == "__main__":
         block_size=args.block_size,
         upscale=args.upscale,
         model_path=args.upscale_model,
-        denoising=args.denoise
+        denoising=args.denoise,
+        algorithm=args.algorithm,
+        overlap_ratio=args.overlap_ratio
     )
     cv2.imwrite(args.output, cv2.cvtColor(out, cv2.COLOR_RGB2BGR))
     print(f"[INFO] Output completed: {args.output}")
